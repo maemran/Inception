@@ -1,12 +1,10 @@
 services:
 
   mariadb:
-    build:
-      context: ./requirements/mariadb
-    image: mariadb
+    build: ./requirements/mariadb
+    image: inception-mariadb
     container_name: mariadb
-    env_file:
-      - .env
+    env_file: .env
     secrets:
       - db_password
       - db_root_password
@@ -17,12 +15,10 @@ services:
     restart: unless-stopped
 
   wordpress:
-    build:
-      context: ./requirements/wordpress
-    image: wordpress
+    build: ./requirements/wordpress
+    image: inception-wordpress
     container_name: wordpress
-    env_file:
-      - .env
+    env_file: .env
     secrets:
       - db_password
       - credentials
@@ -35,12 +31,10 @@ services:
     restart: unless-stopped
 
   nginx:
-    build:
-      context: ./requirements/nginx
-    image: nginx
+    build: ./requirements/nginx
+    image: inception-nginx
     container_name: nginx
-    env_file:
-      - .env
+    env_file: .env
     volumes:
       - wordpress_data:/var/www/html
     ports:

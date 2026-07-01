@@ -1,5 +1,5 @@
 NAME        = inception
-LOGIN       = student
+LOGIN       = moham
 COMPOSE     = srcs/docker-compose.yml
 DATA_PATH   = /home/$(LOGIN)/data
 
