@@ -77,7 +77,7 @@ Inception/
 │       └── nginx/
 │           ├── Dockerfile            # How to build the NGINX image
 │           ├── conf/
-│           │   └── wordpress.conf.template  # NGINX virtual host config template
+│           │   └── nginx.conf  # NGINX virtual host config template
 │           └── tools/
 │               └── setup.sh          # Entrypoint: generates config, TLS cert, starts NGINX
 ├── DEV_DOC.md                        # Developer documentation
@@ -499,7 +499,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN mkdir -p /etc/nginx/ssl
 
-COPY conf/wordpress.conf.template /etc/nginx/sites-available/wordpress.conf.template
+COPY conf/nginx.conf /etc/nginx/sites-available/nginx.conf
 COPY tools/setup.sh /usr/local/bin/setup.sh
 
 RUN rm -f /etc/nginx/sites-enabled/default \
@@ -532,10 +532,10 @@ ENTRYPOINT ["/usr/local/bin/setup.sh"]
 set -euo pipefail
 
 envsubst '${DOMAIN_NAME}' \
-    < /etc/nginx/sites-available/wordpress.conf.template \
-    > /etc/nginx/sites-available/wordpress.conf
+    < /etc/nginx/sites-available/nginx.conf \
+    > /etc/nginx/sites-available/nginx.conf
 
-ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/wordpress.conf
+ln -sf /etc/nginx/sites-available/nginx.conf /etc/nginx/sites-enabled/nginx.conf
 
 if [ ! -f /etc/nginx/ssl/inception.crt ]; then
     openssl req -x509 -nodes -days 365 \
@@ -1424,4 +1424,4 @@ openssl s_client -connect moham.42.fr:443 -servername moham.42.fr < /dev/null 2>
 | `srcs/requirements/wordpress/tools/wp_setup.sh` | Added `--force` to `wp core download`, removed comments |
 | `srcs/requirements/nginx/Dockerfile` | Removed comments |
 | `srcs/requirements/nginx/tools/setup.sh` | Removed echo statements, removed comments |
-| `srcs/requirements/nginx/conf/wordpress.conf.template` | Unchanged |
+| `srcs/requirements/nginx/conf/nginx.conf` | Unchanged |
