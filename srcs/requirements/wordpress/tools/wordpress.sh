@@ -5,7 +5,7 @@ DB_PASSWORD="$(cat /run/secrets/db_password)"
 WP_ADMIN_PASSWORD="$(sed -n '1p' /run/secrets/credentials)"
 WP_USER_PASSWORD="$(sed -n '2p' /run/secrets/credentials)"
 
-until mysqladmin ping -h"mariadb" -u"${MYSQL_USER}" -p"${DB_PASSWORD}" --silent 2>/dev/null; do
+until nc -z mariadb 3306 2>/dev/null; do
     sleep 2
 done
 
@@ -36,4 +36,4 @@ if [ ! -f /var/www/html/wp-config.php ]; then
     chown -R www-data:www-data /var/www/html
 fi
 
-exec php-fpm7.4 -F
+exec php-fpm -F

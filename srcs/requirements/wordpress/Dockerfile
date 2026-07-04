@@ -1,32 +1,29 @@
-FROM debian:bullseye
+FROM debian:bullseye-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        php7.4-fpm \
-        php7.4-mysql \
-        php7.4-curl \
-        php7.4-xml \
-        php7.4-mbstring \
-        php7.4-zip \
-        curl \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        php-fpm \
+        php-mysql \
+        php-xml \
+        php-zip \
+        wget \
         ca-certificates \
-        mariadb-client \
+        netcat-openbsd \
+    && wget https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
-    && chmod +x wp-cli.phar \
+RUN chmod +x wp-cli.phar \
     && mv wp-cli.phar /usr/local/bin/wp
 
-RUN sed -i 's/^listen = .*/listen = 9000/' /etc/php/7.4/fpm/pool.d/www.conf \
-    && sed -i 's/^;\?listen\.owner.*/listen.owner = www-data/' /etc/php/7.4/fpm/pool.d/www.conf \
-    && sed -i 's/^;\?listen\.group.*/listen.group = www-data/' /etc/php/7.4/fpm/pool.d/www.conf
-
-RUN mkdir -p /run/php
-
-COPY tools/wp_setup.sh /usr/local/bin/wp_setup.sh
-RUN chmod +x /usr/local/bin/wp_setup.sh
+RUN sed -i 's/^listen = .*/listen = 9000/' /etc/php/*/fpm/pool.d/www.conf \
+    && mkdir -p /run/php \
+    && ln -s /usr/sbin/php-fpm* /usr/local/bin/php-fpm
 
 WORKDIR /var/www/html
 
+COPY tools/wordpress.sh /usr/local/bin/wordpress.sh
+RUN chmod +x /usr/local/bin/wordpress.sh
+
 EXPOSE 9000
 
-ENTRYPOINT ["/usr/local/bin/wp_setup.sh"]
+ENTRYPOINT ["/usr/local/bin/wordpress.sh"]
