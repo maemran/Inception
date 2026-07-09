@@ -54,7 +54,7 @@ Every entrypoint script follows the same pattern: on first run (detected by
 checking whether the persisted volume already contains data — the MariaDB
 data directory or `wp-config.php`), it performs one-time initialisation,
 then replaces itself with the real foreground process via `exec`, so that
-the daemon runs as PID 1 (`mysqld_safe`, `php-fpm7.4 -F`, `nginx -g "daemon
+the daemon runs as PID 1 (`mariadbd`, `php-fpm -F`, `nginx -g "daemon
 off;"`). There are no infinite-loop placeholder commands (`tail -f`,
 `sleep infinity`, etc.) anywhere in the entrypoints.
 

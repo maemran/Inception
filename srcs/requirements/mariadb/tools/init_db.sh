@@ -1,39 +1,24 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-DB_PASSWORD="$(cat /run/secrets/db_password)"
-DB_ROOT_PASSWORD="$(cat /run/secrets/db_root_password)"
+mkdir -p /run/mysqld
+chown -R mysql:mysql /run/mysqld
 
-init_db() {
-    mysql_install_db --user=mysql --datadir=/var/lib/mysql > /dev/null
-}
+DB_PASSWORD=$(cat /run/secrets/db_password)
+MYSQL_ROOT_PASSWORD=$(cat /run/secrets/db_root_password)
 
-init_sql() {
-    mysqld_safe --skip-networking --datadir=/var/lib/mysql &
-    pid="$!"
-    until mysqladmin ping --silent 2>/dev/null; do
-        sleep 1
-    done
+sed -i "s/127.0.0.1/0.0.0.0/" "/etc/mysql/mariadb.conf.d/50-server.cnf"
 
-    mysql -u root <<-EOSQL
-        DELETE FROM mysql.user WHERE User='';
-        DROP DATABASE IF EXISTS test;
-        CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;
-        CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';
-        GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'%';
-        ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}';
-        FLUSH PRIVILEGES;
-EOSQL
-
-    mysqladmin --user=root --password="${DB_ROOT_PASSWORD}" shutdown
-    wait "$pid"
-}
-
-if [ ! -d "/var/lib/mysql/mysql" ]; then
-    init_db
-    init_sql
-elif [ ! -d "/var/lib/mysql/${MYSQL_DATABASE}" ]; then
-    init_sql
+if [ ! -d /var/lib/mysql/init ]; then
+    cat > /tmp/init.sql <<EOF
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
+CREATE DATABASE IF NOT EXISTS ${MYSQL_DATABASE};
+CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON ${MYSQL_DATABASE}.* TO '${MYSQL_USER}'@'%';
+FLUSH PRIVILEGES;
+EOF
+    mkdir -p /var/lib/mysql/init
+    exec mariadbd --user=mysql --datadir=/var/lib/mysql --init-file=/tmp/init.sql
 fi
 
-exec mysqld_safe --datadir=/var/lib/mysql
+exec mariadbd --user=mysql --datadir=/var/lib/mysql

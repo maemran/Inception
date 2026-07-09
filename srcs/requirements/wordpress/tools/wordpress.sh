@@ -1,9 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
+mkdir -p /var/www/html
+cd /var/www/html
+
 DB_PASSWORD="$(cat /run/secrets/db_password)"
 WP_ADMIN_PASSWORD="$(sed -n '1p' /run/secrets/credentials)"
 WP_USER_PASSWORD="$(sed -n '2p' /run/secrets/credentials)"
+
+sed -i 's/^listen = .*/listen = 9000/' /etc/php/*/fpm/pool.d/www.conf
+mkdir -p /run/php
 
 until nc -z mariadb 3306 2>/dev/null; do
     sleep 2
@@ -36,4 +42,5 @@ if [ ! -f /var/www/html/wp-config.php ]; then
     chown -R www-data:www-data /var/www/html
 fi
 
+ln -sf /usr/sbin/php-fpm* /usr/local/bin/php-fpm
 exec php-fpm -F

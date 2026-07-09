@@ -66,20 +66,16 @@ Inception/
 │   └── requirements/
 │       ├── mariadb/
 │       │   ├── Dockerfile            # How to build the MariaDB image
-│       │   ├── conf/
-│       │   │   └── 50-server.cnf     # MariaDB server configuration
 │       │   └── tools/
 │       │       └── init_db.sh        # Entrypoint: initialises DB, starts server
 │       ├── wordpress/
 │       │   ├── Dockerfile            # How to build the WordPress/PHP image
 │       │   └── tools/
-│       │       └── wp_setup.sh       # Entrypoint: waits for DB, installs WP, starts PHP-FPM
+│       │       └── wordpress.sh      # Entrypoint: waits for DB, installs WP, starts PHP-FPM
 │       └── nginx/
 │           ├── Dockerfile            # How to build the NGINX image
-│           ├── conf/
-│           │   └── nginx.conf  # NGINX virtual host config template
-│           └── tools/
-│               └── setup.sh          # Entrypoint: generates config, TLS cert, starts NGINX
+│           └── conf/
+│               └── nginx.conf        # NGINX virtual host config (static, hardcoded domain)
 ├── DEV_DOC.md                        # Developer documentation
 ├── USER_DOC.md                       # End-user documentation
 └── EXPLANATION.md                    # This file
@@ -153,33 +149,31 @@ directory on the host (bind mount) or managed by Docker.
 
 ### 4.1 NGINX
 
-- **Base image:** `debian:bullseye`
-- **Installed packages:** `nginx`, `openssl`, `gettext-base`
+- **Base image:** `debian:bullseye-slim`
+- **Installed packages:** `nginx`, `openssl`
 - **Role:** HTTPS entry point. All traffic goes through NGINX.
 - **Port:** 443 (HTTPS)
-- **TLS:** Self-signed certificate generated on first start.
+- **TLS:** Self-signed certificate generated at **build time** (in Dockerfile).
 - **What it does:**
-  1. Generates a self-signed SSL certificate with OpenSSL.
-  2. Substitutes `${DOMAIN_NAME}` in the config template using `envsubst`.
-  3. Serves static files (CSS, JS, images) directly from the shared volume.
-  4. Passes `.php` requests to `wordpress:9000` (PHP-FPM).
-- **PID 1:** `nginx -g "daemon off;"`
+  1. Serves static files (CSS, JS, images) directly from the shared volume.
+  2. Passes `.php` requests to `wordpress:9000` (PHP-FPM).
+  3. Config is fully static (no template substitution).
+- **PID 1:** `nginx -g "daemon off;"` (via `CMD`)
 
 ### 4.2 WordPress (PHP-FPM)
 
-- **Base image:** `debian:bullseye`
-- **Installed packages:** `php7.4-fpm`, `php7.4-mysql`, `php7.4-curl`,
-  `php7.4-xml`, `php7.4-mbstring`, `php7.4-zip`, `curl`, `ca-certificates`,
-  `mariadb-client`
+- **Base image:** `debian:bookworm-slim`
+- **Installed packages:** `php-fpm`, `php-mysql`, `php-xml`, `php-zip`, `wget`,
+  `ca-certificates`, `netcat-openbsd`
 - **Role:** Process PHP and serve the WordPress application.
 - **Port:** 9000 (PHP-FPM, internal only)
 - **What it does:**
-  1. Waits for MariaDB to be reachable (polls `mysqladmin ping`).
+  1. Waits for MariaDB to be reachable (polls `nc -z` on port 3306).
   2. Downloads WordPress using WP-CLI if not already present.
   3. Creates `wp-config.php` with database credentials.
   4. Installs WordPress (creates admin user, second user).
   5. Sets correct file ownership (`www-data`).
-- **PID 1:** `php-fpm7.4 -F`
+- **PID 1:** `php-fpm -F`
 
 ### 4.3 MariaDB
 
@@ -188,10 +182,10 @@ directory on the host (bind mount) or managed by Docker.
 - **Role:** Relational database for WordPress.
 - **Port:** 3306 (MySQL protocol, internal only)
 - **What it does:**
-  1. Initialises the database data directory with `mysql_install_db`.
-  2. Starts a temporary server, runs SQL to create the database and users.
-  3. Shuts down the temporary server and starts the real server.
-- **PID 1:** `mysqld_safe`
+  1. Changes MariaDB bind-address from `127.0.0.1` to `0.0.0.0` via `sed`.
+  2. On first run: runs `mariadbd --init-file` to create the database and users.
+  3. On subsequent runs: skips init and starts `mariadbd` directly.
+- **PID 1:** `mariadbd`
 
 ---
 
@@ -444,14 +438,14 @@ server).
 
 ### 9.5 How the certificate is generated
 
-In `srcs/requirements/nginx/tools/setup.sh`:
+In `srcs/requirements/nginx/Dockerfile` (at **build time**):
 
 ```bash
-openssl req -x509 -nodes -days 365 \
-    -newkey rsa:2048 \
+RUN openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout /etc/nginx/ssl/inception.key \
     -out /etc/nginx/ssl/inception.crt \
-    -subj "/C=JO/ST=Amman/L=Amman/O=42School/OU=Inception/CN=${DOMAIN_NAME}"
+    -days 365 \
+    -subj "/C=JO/ST=Amman/L=Amman/O=42/OU=Inception/CN=moham.42.fr"
 ```
 
 Breaking this down:
@@ -473,14 +467,14 @@ listen 443 ssl;
 ssl_certificate     /etc/nginx/ssl/inception.crt;
 ssl_certificate_key /etc/nginx/ssl/inception.key;
 ssl_protocols       TLSv1.2 TLSv1.3;
-ssl_ciphers         HIGH:!aNULL:!MD5;
 ```
 
 - `listen 443 ssl;` — listen on port 443 with SSL/TLS enabled
 - `ssl_protocols TLSv1.2 TLSv1.3;` — only accept modern, secure protocol
   versions (not the broken SSLv3, TLSv1.0, TLSv1.1)
-- `ssl_ciphers HIGH:!aNULL:!MD5;` — use strong ciphers, exclude anonymous
-  ciphers and the broken MD5 algorithm
+
+The cipher list is left at OpenSSL's default (`DEFAULT@SECLEVEL=1`), which
+already excludes anonymous ciphers and broken algorithms on Debian.
 
 ---
 
@@ -489,99 +483,59 @@ ssl_ciphers         HIGH:!aNULL:!MD5;
 ### 10.1 Dockerfile
 
 ```dockerfile
-FROM debian:bullseye
+FROM debian:bullseye-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        nginx \
-        openssl \
-        gettext-base \
+RUN apt update -y \
+    && apt install nginx openssl -y \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/nginx/ssl
 
-COPY conf/nginx.conf /etc/nginx/sites-available/nginx.conf
-COPY tools/setup.sh /usr/local/bin/setup.sh
+COPY conf/nginx.conf /etc/nginx/conf.d/default.conf
+RUN rm -f /etc/nginx/sites-enabled/default
 
-RUN rm -f /etc/nginx/sites-enabled/default \
-    && chmod +x /usr/local/bin/setup.sh
+RUN openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout /etc/nginx/ssl/inception.key \
+    -out /etc/nginx/ssl/inception.crt \
+    -days 365 \
+    -subj "/C=JO/ST=Amman/L=Amman/O=42/OU=Inception/CN=moham.42.fr"
 
 EXPOSE 443
 
-ENTRYPOINT ["/usr/local/bin/setup.sh"]
+CMD ["nginx", "-g", "daemon off;"]
 ```
 
 **What each line does:**
 
 | Instruction | Purpose |
 |-------------|---------|
-| `FROM debian:bullseye` | Start from the penultimate stable Debian release |
-| `RUN apt-get install nginx` | Install the NGINX web server |
-| `RUN ... install openssl` | Install OpenSSL to generate TLS certificates |
-| `RUN ... install gettext-base` | Install `envsubst` for variable substitution in config |
-| `mkdir -p /etc/nginx/ssl` | Create directory for TLS certificate and key |
-| `COPY conf/...` | Copy the NGINX virtual host template into the image |
-| `COPY tools/setup.sh` | Copy the entrypoint script |
-| `rm -f /etc/nginx/sites-enabled/default` | Remove the default NGINX site |
+| `FROM debian:bullseye-slim` | Start from a minimal Debian image |
+| `RUN apt install nginx openssl` | Install the NGINX web server and OpenSSL |
+| `RUN mkdir -p /etc/nginx/ssl` | Create directory for TLS certificate and key |
+| `COPY conf/nginx.conf /etc/nginx/conf.d/default.conf` | Copy the static NGINX config into the `conf.d` directory (auto-included by NGINX) |
+| `RUN rm -f /etc/nginx/sites-enabled/default` | Remove the default NGINX site to avoid conflicts |
+| `RUN openssl req -x509 ...` | Generate a self-signed TLS certificate at **build time** (one-time, embedded in the image) |
 | `EXPOSE 443` | Document that the container listens on port 443 |
-| `ENTRYPOINT [...]` | Set the entrypoint script that runs when the container starts |
+| `CMD ["nginx", "-g", "daemon off;"]` | Start NGINX in the foreground as PID 1 |
 
-### 10.2 Entrypoint script (`setup.sh`)
+**Key differences from a more complex approach:**
+- No entrypoint script (`setup.sh` was removed) — the Dockerfile generates the
+  cert at build time and uses `CMD` directly.
+- No `envsubst` / `gettext-base` — the domain is hardcoded in the config file.
+  This works because `moham.42.fr` never changes for this project.
+- Config goes to `/etc/nginx/conf.d/` (auto-included) instead of
+  `sites-available` + symlink.
 
-```bash
-#!/bin/bash
-set -euo pipefail
-
-envsubst '${DOMAIN_NAME}' \
-    < /etc/nginx/sites-available/nginx.conf \
-    > /etc/nginx/sites-available/nginx.conf
-
-ln -sf /etc/nginx/sites-available/nginx.conf /etc/nginx/sites-enabled/nginx.conf
-
-if [ ! -f /etc/nginx/ssl/inception.crt ]; then
-    openssl req -x509 -nodes -days 365 \
-        -newkey rsa:2048 \
-        -keyout /etc/nginx/ssl/inception.key \
-        -out /etc/nginx/ssl/inception.crt \
-        -subj "/C=JO/ST=Amman/L=Amman/O=42School/OU=Inception/CN=${DOMAIN_NAME}"
-fi
-
-exec nginx -g "daemon off;"
-```
-
-**Step by step:**
-
-1. **`set -euo pipefail`** — Bash safety options:
-   - `-e`: exit immediately if any command fails
-   - `-u`: treat unset variables as an error
-   - `-o pipefail`: if any command in a pipeline fails, the whole pipeline fails
-
-2. **`envsubst`** — reads the template file, replaces `${DOMAIN_NAME}` with its
-   actual value from the environment, writes the result to the real config file.
-
-3. **`ln -sf`** — creates a symbolic link from `sites-available` to
-   `sites-enabled` (NGINX convention: `sites-available` holds all configs,
-   `sites-enabled` holds only the active ones).
-
-4. **Certificate generation** — only if it doesn't already exist (so it persists
-   across container restarts if you mount the ssl directory).
-
-5. **`exec nginx -g "daemon off;"`** — replaces the shell process with NGINX
-   running in the foreground. This is critical: Docker containers stop when
-   PID 1 exits. By using `exec`, NGINX becomes PID 1 and keeps the container
-   alive. Without `daemon off;`, NGINX would fork to the background and the
-   container would exit immediately.
-
-### 10.3 NGINX config template
+### 10.2 NGINX config (`nginx.conf`)
 
 ```nginx
 server {
     listen 443 ssl;
-    server_name ${DOMAIN_NAME};
+    server_name moham.42.fr;
 
     ssl_certificate     /etc/nginx/ssl/inception.crt;
     ssl_certificate_key /etc/nginx/ssl/inception.key;
     ssl_protocols       TLSv1.2 TLSv1.3;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
 
     root  /var/www/html;
     index index.php index.html;
@@ -608,7 +562,7 @@ server {
 | Directive | Meaning |
 |-----------|---------|
 | `listen 443 ssl;` | Listen on port 443, enable SSL/TLS |
-| `server_name ${DOMAIN_NAME};` | Respond only to requests for this domain |
+| `server_name moham.42.fr;` | Respond only to requests for this domain (hardcoded) |
 | `root /var/www/html;` | Serve files from this directory |
 | `index index.php index.html;` | Default files to serve when a directory is requested |
 | `location /` | For any URL, try the exact file first, then the directory, then pass to `index.php` |
@@ -625,6 +579,11 @@ requests are routed through `index.php`. If someone visits
 that directory (doesn't exist), then falls back to `/index.php?/2024/01/my-post/`
 which WordPress interprets to show the correct post.
 
+**Why no `ssl_ciphers` directive?** Removing it lets NGINX use OpenSSL's
+built-in default cipher list (`DEFAULT@SECLEVEL=1`), which already excludes
+anonymous ciphers and broken algorithms. This simplifies the config while
+remaining secure.
+
 ---
 
 ## 11. MariaDB in detail
@@ -634,16 +593,13 @@ which WordPress interprets to show the correct post.
 ```dockerfile
 FROM debian:bullseye
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        mariadb-server \
+RUN apt-get update && apt-get install -y --no-install-recommends mariadb-server \
     && rm -rf /var/lib/apt/lists/*
 
-COPY conf/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
-COPY tools/init_db.sh /usr/local/bin/init_db.sh
+RUN mkdir -p /var/run/mysqld && chown -R mysql:mysql /var/run/mysqld /var/lib/mysql
 
-RUN chmod +x /usr/local/bin/init_db.sh \
-    && mkdir -p /var/run/mysqld \
-    && chown -R mysql:mysql /var/run/mysqld /var/lib/mysql
+COPY tools/init_db.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/init_db.sh
 
 EXPOSE 3306
 
@@ -655,135 +611,91 @@ ENTRYPOINT ["/usr/local/bin/init_db.sh"]
   needed on the server container (WordPress has its own client).
 - `/var/run/mysqld` is created and owned by `mysql` so the socket file can be
   written there.
-- We chown `/var/lib/mysql` to `mysql` before/during the build step. The
-  actual data will later be mounted from the volume, but the base permissions
-  must be correct.
+- We chown `/var/lib/mysql` to `mysql` before the volume is mounted, so the
+  base permissions are correct.
+- No custom `50-server.cnf` — the default config is modified at runtime via
+  `sed` in the entrypoint script.
 
-### 11.2 MariaDB config (`50-server.cnf`)
-
-```ini
-[mysqld]
-user            = mysql
-bind-address    = 0.0.0.0
-port            = 3306
-datadir         = /var/lib/mysql
-socket          = /run/mysqld/mysqld.sock
-pid-file        = /run/mysqld/mysqld.pid
-skip-name-resolve
-```
-
-| Setting | Purpose |
-|---------|---------|
-| `user = mysql` | Run the MariaDB process as the `mysql` system user |
-| `bind-address = 0.0.0.0` | Listen on **all** network interfaces (not just localhost). Required because WordPress connects over the network from a different container. Without this, MariaDB would only accept connections from the same machine via Unix socket. |
-| `port = 3306` | Standard MySQL/MariaDB port |
-| `datadir = /var/lib/mysql` | Where database files are stored (on the persisted volume) |
-| `socket = /run/mysqld/mysqld.sock` | Unix socket file for local connections |
-| `pid-file = /run/mysqld/mysqld.pid` | File containing the process ID |
-| `skip-name-resolve` | Don't resolve client hostnames. Speeds up connections and avoids DNS issues. With this setting, you must use IP-based or `%` (wildcard) in user host grants. |
-
-**Why `bind-address = 0.0.0.0`?** By default, MariaDB only listens on
-`127.0.0.1` (localhost). This is secure for a local installation but prevents
-other containers from connecting. Since WordPress runs in a separate container,
-MariaDB must listen on all interfaces (`0.0.0.0`) — but only the Docker
-internal network, so it's still not exposed to the outside world.
-
-### 11.3 Entrypoint script (`init_db.sh`)
+### 11.2 Entrypoint script (`init_db.sh`)
 
 ```bash
 #!/bin/bash
-set -euo pipefail
+set -e
 
-DB_PASSWORD="$(cat /run/secrets/db_password)"
-DB_ROOT_PASSWORD="$(cat /run/secrets/db_root_password)"
+mkdir -p /run/mysqld
+chown -R mysql:mysql /run/mysqld
 
-init_db() {
-    mysql_install_db --user=mysql --datadir=/var/lib/mysql > /dev/null
-}
+DB_PASSWORD=$(cat /run/secrets/db_password)
+MYSQL_ROOT_PASSWORD=$(cat /run/secrets/db_root_password)
 
-init_sql() {
-    mysqld_safe --skip-networking --datadir=/var/lib/mysql &
-    pid="$!"
-    until mysqladmin ping --silent 2>/dev/null; do
-        sleep 1
-    done
+sed -i "s/127.0.0.1/0.0.0.0/" "/etc/mysql/mariadb.conf.d/50-server.cnf"
 
-    mysql -u root <<-EOSQL
-        DELETE FROM mysql.user WHERE User='';
-        DROP DATABASE IF EXISTS test;
-        CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;
-        CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';
-        GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'%';
-        ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}';
-        FLUSH PRIVILEGES;
-EOSQL
-
-    mysqladmin --user=root --password="${DB_ROOT_PASSWORD}" shutdown
-    wait "$pid"
-}
-
-if [ ! -d "/var/lib/mysql/mysql" ]; then
-    init_db
-    init_sql
-elif [ ! -d "/var/lib/mysql/${MYSQL_DATABASE}" ]; then
-    init_sql
+if [ ! -d /var/lib/mysql/init ]; then
+    cat > /tmp/init.sql <<EOF
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
+CREATE DATABASE IF NOT EXISTS ${MYSQL_DATABASE};
+CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON ${MYSQL_DATABASE}.* TO '${MYSQL_USER}'@'%';
+FLUSH PRIVILEGES;
+EOF
+    mkdir -p /var/lib/mysql/init
+    exec mariadbd --user=mysql --datadir=/var/lib/mysql --init-file=/tmp/init.sql
 fi
 
-exec mysqld_safe --datadir=/var/lib/mysql
+exec mariadbd --user=mysql --datadir=/var/lib/mysql
 ```
 
-**Why this complex script?** MariaDB needs to be initialised before it can be
-used. The first time the container runs:
+**Step by step:**
 
-1. **`mysql_install_db`** creates the initial database structure (system tables,
-   default users) in the data directory. This only runs once.
+1. **Runtime setup** — Creates `/run/mysqld` (for the socket file) and ensures
+   it is owned by the `mysql` user.
 
-2. **`mysqld_safe --skip-networking &`** starts a temporary MariaDB server with
-   networking disabled (only accessible via Unix socket). We start it in the
-   background (`&`) so we can run SQL commands.
+2. **Read secrets** — Passwords are read from Docker secrets files.
 
-3. **Wait loop:** `until mysqladmin ping` waits until the server is ready to
-   accept connections.
+3. **`sed` bind-address** — Changes `bind-address` from `127.0.0.1` to
+   `0.0.0.0` in the default config file. This is necessary because WordPress
+   connects over the network from a different container. Without this, MariaDB
+   would only accept connections from localhost via Unix socket.
+   No custom config file needed — the default Debian `/etc/mysql/mariadb.conf.d/50-server.cnf`
+   is patched in place.
 
-4. **SQL commands:**
-   - `DELETE FROM mysql.user WHERE User='';` — remove anonymous users (security)
-   - `DROP DATABASE IF EXISTS test;` — remove the default test database (security)
-   - `CREATE DATABASE ...` — create the WordPress database
-   - `CREATE USER ...` — create the WordPress application user
-   - `GRANT ALL PRIVILEGES ...` — give the user full access to the WordPress DB
-   - `ALTER USER 'root'@'localhost' ...` — set the MariaDB root password
-   - `FLUSH PRIVILEGES;` — apply all changes immediately
+4. **First-run check (`/var/lib/mysql/init`)** — This marker directory is
+   created after the first successful initialisation. If it exists, we skip
+   the initialisation entirely.
 
-5. **`mysqladmin shutdown`** — stop the temporary server.
+5. **Init SQL file** — Written to `/tmp/init.sql` and passed to `mariadbd`
+   via `--init-file`. The SQL:
+   - Sets the root password
+   - Creates the WordPress database
+   - Creates the application user (`wp_user`) with access from any host (`'%'`)
+   - Grants all privileges on the WordPress database to that user
+   - Flushes privileges
 
-6. **`wait "$pid"`** — wait for the temporary server to fully shut down.
+6. **`exec mariadbd --init-file`** — Starts MariaDB directly with the init SQL.
+   On an empty data directory, `mariadbd` automatically bootstraps the system
+   tables, executes the init SQL, and then serves normally. The `exec` replaces
+   the shell so `mariadbd` becomes PID 1.
 
-7. **`exec mysqld_safe`** — start the real MariaDB server in the foreground.
+7. **Subsequent runs** — `/var/lib/mysql/init` exists on the persistent volume,
+   so it skips the init block and just runs `exec mariadbd` directly.
 
-**The `elif` branch:** If the `mysql` system database exists (from a partial
-init) but the `wordpress` database doesn't, we re-run the SQL. This handles
-cases where the initialisation was interrupted.
+**Why `mariadbd` and not `mysqld_safe`?** `mariadbd` is the actual MariaDB
+server binary. `mysqld_safe` is a wrapper that restarts the server if it
+crashes and logs to syslog. In a Docker container, restart logic is handled by
+Docker itself (`restart: unless-stopped` in the compose file), so the wrapper
+is unnecessary. Running `mariadbd` directly is simpler and the standard pattern
+for MariaDB in Docker.
 
-**Why `mysqld_safe` and not `mysqld`?** `mysqld_safe` is a wrapper that:
-- Launches `mysqld` (the actual server)
-- Restarts it if it crashes
-- Logs startup information to syslog
-
-### 11.4 The SQL in detail
+### 11.3 The SQL in detail
 
 ```sql
-DELETE FROM mysql.user WHERE User='';
+ALTER USER 'root'@'localhost' IDENTIFIED BY 'root_password';
 ```
-Removes anonymous user accounts. MariaDB creates an anonymous user by default
-that allows anyone to connect without a password. This is a security risk.
+Sets a password for the MariaDB root user. Without this, root can connect
+without a password (using Unix socket authentication).
 
 ```sql
-DROP DATABASE IF EXISTS test;
-```
-Removes the default `test` database. Also a security risk.
-
-```sql
-CREATE DATABASE IF NOT EXISTS `wordpress`;
+CREATE DATABASE IF NOT EXISTS wordpress;
 ```
 Creates the database where WordPress will store all its data (posts, users,
 comments, options, etc.).
@@ -796,16 +708,10 @@ Creates a database user named `wp_user` that can connect from **any host**
 will use these credentials to connect.
 
 ```sql
-GRANT ALL PRIVILEGES ON `wordpress`.* TO 'wp_user'@'%';
+GRANT ALL PRIVILEGES ON wordpress.* TO 'wp_user'@'%';
 ```
 Gives `wp_user` full permissions on the `wordpress` database only. It cannot
 access other databases (like `mysql` system tables).
-
-```sql
-ALTER USER 'root'@'localhost' IDENTIFIED BY 'root_password';
-```
-Sets a password for the MariaDB root user. Without this, root can connect
-without a password (using Unix socket authentication).
 
 ```sql
 FLUSH PRIVILEGES;
@@ -820,78 +726,49 @@ restarting.
 ### 12.1 Dockerfile
 
 ```dockerfile
-FROM debian:bullseye
+FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        php7.4-fpm \
-        php7.4-mysql \
-        php7.4-curl \
-        php7.4-xml \
-        php7.4-mbstring \
-        php7.4-zip \
-        curl \
-        ca-certificates \
-        mariadb-client \
+RUN apt-get update  \
+    && apt-get install -y --no-install-recommends netcat-openbsd php-fpm php-mysql php-xml php-zip wget ca-certificates \
+    && wget https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     && rm -rf /var/lib/apt/lists/*
+COPY tools/wordpress.sh .
+RUN php wp-cli.phar --info
+RUN chmod +x wp-cli.phar
+RUN mv wp-cli.phar /usr/local/bin/wp
+RUN chmod +x wordpress.sh
 
-RUN curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
-    && chmod +x wp-cli.phar \
-    && mv wp-cli.phar /usr/local/bin/wp
-
-RUN sed -i 's/^listen = .*/listen = 9000/' /etc/php/7.4/fpm/pool.d/www.conf \
-    && sed -i 's/^;\?listen\.owner.*/listen.owner = www-data/' /etc/php/7.4/fpm/pool.d/www.conf \
-    && sed -i 's/^;\?listen\.group.*/listen.group = www-data/' /etc/php/7.4/fpm/pool.d/www.conf
-
-RUN mkdir -p /run/php
-
-COPY tools/wp_setup.sh /usr/local/bin/wp_setup.sh
-RUN chmod +x /usr/local/bin/wp_setup.sh
-
-WORKDIR /var/www/html
-
-EXPOSE 9000
-
-ENTRYPOINT ["/usr/local/bin/wp_setup.sh"]
+ENTRYPOINT ["./wordpress.sh"]
 ```
 
 **Why each package?**
 
 | Package | Purpose |
 |---------|---------|
-| `php7.4-fpm` | PHP-FastCGI Process Manager — runs PHP as a service that NGINX can talk to |
-| `php7.4-mysql` | PHP extension for connecting to MySQL/MariaDB |
-| `php7.4-curl` | PHP extension for HTTP requests (WordPress needs it for updates, API calls) |
-| `php7.4-xml` | PHP XML parser (WordPress uses XML-RPC, RSS feeds) |
-| `php7.4-mbstring` | Multibyte string support (internationalisation) |
-| `php7.4-zip` | ZIP file handling (plugin/theme uploads) |
-| `curl` | Command-line tool for downloading WP-CLI |
+| `php-fpm` | PHP-FastCGI Process Manager — runs PHP as a service that NGINX can talk to (versionless, resolves to the Debian default PHP — 8.2 on bookworm) |
+| `php-mysql` | PHP extension for connecting to MySQL/MariaDB |
+| `php-xml` | PHP XML parser (WordPress uses XML-RPC, RSS feeds) |
+| `php-zip` | ZIP file handling (plugin/theme uploads) |
+| `wget` | Downloads WP-CLI during build |
 | `ca-certificates` | CA certificates for HTTPS downloads |
-| `mariadb-client` | Contains `mysqladmin` and `mysql` CLI for waiting/checking DB |
+| `netcat-openbsd` | Contains `nc` for checking if MariaDB port is open |
 
-**PHP-FPM config modification:**
-```dockerfile
-RUN sed -i 's/^listen = .*/listen = 9000/' /etc/php/7.4/fpm/pool.d/www.conf
-```
-By default, PHP-FPM listens on a Unix socket (`/run/php/php7.4-fpm.sock`).
-This only works if NGINX and PHP are on the same machine. Since they are in
-**separate containers**, we change it to listen on TCP port 9000 so NGINX can
-connect over the Docker network.
+Packages **not installed** that are commonly seen:
+- `mariadb-client` — not needed; port check uses `nc` instead of `mysqladmin`
+- `php-curl` — not explicitly needed; WordPress fallback works without it
+- `php-mbstring` — included in the default PHP install on bookworm
 
-```dockerfile
-RUN mkdir -p /run/php
-```
-PHP-FPM needs the `/run/php` directory to exist for its PID file. Without this,
-it fails with "Unable to create the PID file".
+**`php wp-cli.phar --info`** — This verifies that the PHAR (PHP Archive) is
+valid and runnable. If the download was corrupted or the PHP version is
+incompatible, this command will fail during the build instead of at runtime.
 
-**WP-CLI download:**
-```dockerfile
-RUN curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
-    && chmod +x wp-cli.phar \
-    && mv wp-cli.phar /usr/local/bin/wp
-```
-Downloads the WP-CLI (WordPress Command Line Interface) tool during image
-build. This allows us to install and configure WordPress from the command line
-without a browser.
+**No `WORKDIR`** — The default working directory is `/`. The script copies to
+`/wordpress.sh` and `ENTRYPOINT ["./wordpress.sh"]` resolves to `/wordpress.sh`.
+The script then `cd`s to `/var/www/html` at runtime to perform WordPress
+operations there.
+
+**No `EXPOSE`** — `EXPOSE` is documentation-only and not required for
+functionality. The port 9000 is still reachable within the Docker network.
 
 ### 12.2 What is WP-CLI?
 
@@ -906,17 +783,22 @@ can:
 Without WP-CLI, you would need to run the WordPress web installer in a browser,
 which is impractical in a Docker setup.
 
-### 12.3 Entrypoint script (`wp_setup.sh`)
+### 12.3 Entrypoint script (`wordpress.sh`)
 
 ```bash
 #!/bin/bash
 set -euo pipefail
 
+cd /var/www/html
+
 DB_PASSWORD="$(cat /run/secrets/db_password)"
 WP_ADMIN_PASSWORD="$(sed -n '1p' /run/secrets/credentials)"
 WP_USER_PASSWORD="$(sed -n '2p' /run/secrets/credentials)"
 
-until mysqladmin ping -h"mariadb" -u"${MYSQL_USER}" -p"${DB_PASSWORD}" --silent 2>/dev/null; do
+sed -i 's/^listen = .*/listen = 9000/' /etc/php/*/fpm/pool.d/www.conf
+mkdir -p /run/php
+
+until nc -z mariadb 3306 2>/dev/null; do
     sleep 2
 done
 
@@ -947,44 +829,40 @@ if [ ! -f /var/www/html/wp-config.php ]; then
     chown -R www-data:www-data /var/www/html
 fi
 
-exec php-fpm7.4 -F
+ln -sf /usr/sbin/php-fpm* /usr/local/bin/php-fpm
+exec php-fpm -F
 ```
 
 **Step by step:**
 
-1. **Read secrets** — passwords are read from Docker secrets files.
+1. **`cd /var/www/html`** — Changes to the WordPress directory. Since the
+   default working directory is `/` (no `WORKDIR` in Dockerfile), we must
+   navigate to the volume-mounted WordPress directory.
 
-2. **Wait for MariaDB** — The `until` loop runs `mysqladmin ping` connecting to
-   the `mariadb` host. This blocks until MariaDB is ready to accept
-   connections. Without this, WordPress would try to create its config and
-   install before the database is ready, causing errors.
+2. **Read secrets** — Passwords are read from Docker secrets files.
 
-3. **Check if already installed** — `[ ! -f /var/www/html/wp-config.php ]`
-   checks if WordPress has already been set up. This file is only created
-   during installation and persists in the shared volume. If it exists, we
-   skip the entire installation block.
+3. **PHP-FPM config** — `sed` changes the listen directive from the default
+   Unix socket to TCP port 9000. The glob `php/*/fpm` matches any PHP version
+   directory (no hardcoded version). Also ensures `/run/php` exists.
 
-4. **`wp core download --force`** — Downloads WordPress core files (the entire
-   CMS source code) into `/var/www/html`. The `--force` flag overwrites any
-   existing files (handles partial downloads).
+4. **Wait for MariaDB** — Uses `nc -z mariadb 3306` (netcat) to check if port
+   3306 is open. This is simpler than `mysqladmin ping` and doesn't require
+   `mariadb-client`. The loop blocks until MariaDB is ready.
 
-5. **`wp config create`** — Generates `wp-config.php` with the database
-   connection details. WordPress needs this file to know how to connect to the
-   database.
+5. **Check if already installed** — `[ ! -f /var/www/html/wp-config.php ]`
+   checks if WordPress has already been set up. This file persists in the
+   shared volume. If it exists, we skip the installation block.
 
-6. **`wp core install`** — Runs the WordPress installation wizard from the
-   command line. Creates the admin user, sets the site title, and configures
-   the site URL.
+6. **WordPress installation** — Downloads core, creates `wp-config.php`,
+   installs WordPress (creates admin + editor users), and fixes ownership.
 
-7. **`wp user create`** — Creates a second user with the `editor` role.
-   The subject requires at least two users.
+7. **`ln -sf /usr/sbin/php-fpm* /usr/local/bin/php-fpm`** — Creates a symlink
+   so the versionless `php-fpm` command works. On Debian bookworm the binary
+   is `/usr/sbin/php-fpm8.2` (versioned). The symlink makes the command
+   distribution-agnostic.
 
-8. **`chown -R www-data:www-data`** — Ensures all WordPress files are owned by
-   the `www-data` user (the user that PHP-FPM runs as). Without this,
-   WordPress might not be able to write to `wp-content/uploads` etc.
-
-9. **`exec php-fpm7.4 -F`** — Starts PHP-FPM in the foreground (`-F` flag) as
-   PID 1. The `-F` flag prevents PHP-FPM from daemonising.
+8. **`exec php-fpm -F`** — Starts PHP-FPM in the foreground (`-F` flag) as
+   PID 1.
 
 ### 12.4 WordPress database connection
 
@@ -1232,31 +1110,31 @@ compose file's directory (`srcs/`), so `../secrets/` resolves to
 1. Makefile creates /home/moham/data/wordpress and /home/moham/data/mariadb
 
 2. Docker Compose builds images:
-   ├── inception-mariadb   (installs MariaDB from Debian packages)
-   ├── inception-wordpress  (installs PHP, WP-CLI, configures PHP-FPM)
-   └── inception-nginx     (installs NGINX, OpenSSL)
+   ├── inception-mariadb   (installs MariaDB, generates TLS cert at build time)
+   ├── inception-wordpress  (installs PHP, WP-CLI)
+   └── inception-nginx     (installs NGINX, OpenSSL, generates TLS cert at build time)
 
 3. Docker creates the inception network
 
 4. Docker creates the named volumes (bound to host directories)
 
 5. MariaDB container starts:
-   ├── mysql_install_db creates system tables
-   ├── Temporary server starts
-   ├── SQL: create database 'wordpress', user 'wp_user'@'%', set root password
-   ├── Temporary server stops
-   └── mysqld_safe starts (PID 1)
+   ├── sed changes bind-address to 0.0.0.0
+   ├── /var/lib/mysql/init doesn't exist → runs init SQL via --init-file
+   ├── mariadbd bootstraps system tables, executes init.sql, starts serving
+   └── mariadbd runs as PID 1
 
 6. WordPress container starts (after MariaDB is "up"):
-   ├── Waits for MariaDB to accept connections
+   ├── sed changes PHP-FPM listen to TCP 9000
+   ├── Waits for MariaDB port 3306 (nc -z)
    ├── Downloads WordPress core (wp-cli)
    ├── Creates wp-config.php
    ├── Installs WordPress (creates admin + editor users)
-   └── php-fpm7.4 starts (PID 1)
+   └── php-fpm starts (PID 1)
 
-7. NGINX container starts (after WordPress is "up"):
-   ├── Generates nginx config from template (envsubst)
-   ├── Generates self-signed TLS certificate
+7. NGINX container starts:
+   ├── Config is already static (hardcoded domain)
+   ├── TLS cert is already in the image (generated at build time)
    └── nginx starts (PID 1)
 
 8. Site is accessible at https://moham.42.fr
@@ -1266,9 +1144,9 @@ compose file's directory (`srcs/`), so `../secrets/` resolves to
 
 ```
 1. Volumes still have data from the previous run
-2. MariaDB: /var/lib/mysql/mysql exists → skip initialisation, start mysqld_safe
+2. MariaDB: /var/lib/mysql/init exists → skip initialisation, start mariadbd directly
 3. WordPress: /var/www/html/wp-config.php exists → skip install, start php-fpm
-4. NGINX: config and cert exist → skip generation, start nginx
+4. NGINX: nothing to regenerate, nginx starts immediately
 ```
 
 ### 15.3 A user visits https://moham.42.fr
@@ -1411,17 +1289,19 @@ openssl s_client -connect moham.42.fr:443 -servername moham.42.fr < /dev/null 2>
 | 9000 | PHP-FPM | FastCGI  | No (internal only)    | PHP processing |
 | 3306 | MariaDB | MySQL    | No (internal only)    | Database |
 
-## Appendix C: Files modified in this project
+## Appendix C: Files in this project
 
-| File | What changed |
-|------|-------------|
-| `srcs/.env` | `DATA_PATH=/home/moham/data`, `DOMAIN_NAME=moham.42.fr`, fixed emails |
-| `srcs/docker-compose.yml` | Images renamed to `inception-*`, simplified structure |
-| `srcs/requirements/mariadb/Dockerfile` | Removed `mariadb-client`, removed comments |
-| `srcs/requirements/mariadb/tools/init_db.sh` | Reordered SQL (passwords last), added fallback for partial init |
-| `srcs/requirements/mariadb/conf/50-server.cnf` | Unchanged (was already minimal) |
-| `srcs/requirements/wordpress/Dockerfile` | Added `mkdir -p /run/php`, removed `php7.4-gd`, removed comments |
-| `srcs/requirements/wordpress/tools/wp_setup.sh` | Added `--force` to `wp core download`, removed comments |
-| `srcs/requirements/nginx/Dockerfile` | Removed comments |
-| `srcs/requirements/nginx/tools/setup.sh` | Removed echo statements, removed comments |
-| `srcs/requirements/nginx/conf/nginx.conf` | Unchanged |
+| File | Purpose |
+|------|---------|
+| `Makefile` | Entry point: setup, build, up, down, clean, re |
+| `srcs/.env` | Non-secret config: domain, DB name, usernames, paths |
+| `srcs/docker-compose.yml` | Orchestrates 3 services, network, volumes, secrets |
+| `srcs/requirements/mariadb/Dockerfile` | Builds MariaDB image (`debian:bullseye` + `mariadb-server`) |
+| `srcs/requirements/mariadb/tools/init_db.sh` | Entrypoint: patches bind-address, init DB via `--init-file`, starts `mariadbd` |
+| `srcs/requirements/wordpress/Dockerfile` | Builds PHP image (`debian:bookworm-slim` + PHP 8.2 + WP-CLI) |
+| `srcs/requirements/wordpress/tools/wordpress.sh` | Entrypoint: configures PHP-FPM for TCP, waits for DB, installs WordPress, starts `php-fpm` |
+| `srcs/requirements/nginx/Dockerfile` | Builds NGINX image (`debian:bullseye-slim` + nginx + openssl, generates TLS cert at build time) |
+| `srcs/requirements/nginx/conf/nginx.conf` | Static NGINX virtual host config (hardcoded domain, TLSv1.2/1.3, proxy to wordpress:9000) |
+| `secrets/db_password.txt` | MariaDB application user password (gitignored) |
+| `secrets/db_root_password.txt` | MariaDB root password (gitignored) |
+| `secrets/credentials.txt` | WordPress admin (line 1) and editor (line 2) passwords (gitignored) |

@@ -101,7 +101,7 @@ Debian** (`debian:bullseye` at the time of writing — adjust the base image
 tag if a newer "penultimate stable" version is current when you build this).
 No service runs more than one process in the foreground: each container's
 entrypoint script performs first-run initialisation if needed, then
-`exec`s the real daemon (`mysqld_safe`, `php-fpm7.4 -F`, `nginx -g "daemon
+`exec`s the real daemon (`mariadbd`, `php-fpm -F`, `nginx -g "daemon
 off;"`) so that it runs as PID 1 and receives signals correctly — no
 `tail -f`, `sleep infinity`, or bare `bash` hacks.
 
