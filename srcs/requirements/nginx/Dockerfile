@@ -7,7 +7,6 @@ RUN apt update -y \
 RUN mkdir -p /etc/nginx/ssl
 
 COPY conf/nginx.conf /etc/nginx/conf.d/default.conf
-RUN rm -f /etc/nginx/sites-enabled/default
 
 RUN openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout /etc/nginx/ssl/inception.key \
